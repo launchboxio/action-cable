@@ -28,6 +28,9 @@ func (s *Subscription) Connect() error {
 		Identifier: s.Identifier,
 	}
 
-	s.Stream.Send(event)
-	return nil
+	return s.Stream.Send(event)
+}
+
+func (s *Subscription) Send(event *ActionCableEvent) error {
+	return s.Stream.Send(event)
 }
