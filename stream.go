@@ -1,26 +1,33 @@
 package mux_socket
 
 import (
-	"context"
-	"errors"
-	"fmt"
-	"github.com/gorilla/websocket"
-	"net/http"
-	"net/url"
-	"time"
+  "context"
+  "github.com/gorilla/websocket"
+  "net/http"
+  "net/url"
+  "reflect"
+  "slices"
+  "time"
 )
 
+var ignoredEvents = []string{
+	"ping",
+	"welcome",
+	"confirm_subscription",
+}
+
 type Stream struct {
-	Adapter Adapter
-	Url     string
-	Header  http.Header
+	Url    string
+	Header http.Header
 
 	NotFoundHandler HandlerFunc
 	ErrorHandler    func(error)
 	OnDisconnect    func()
 	OnConnect       func()
+	OnMessage       func(message []byte)
 
-	subscriptions map[string][]HandlerFunc
+	adapter       ActionCableAdapter
+	subscriptions []*Subscription
 
 	send chan []byte
 
@@ -28,27 +35,32 @@ type Stream struct {
 	connection *websocket.Conn
 }
 
-type HandlerFunc func(event Event)
+type Handler struct {
+	HandlerFunc HandlerFunc
+	Format      interface{}
+}
+
+func NewHandler(f HandlerFunc, format interface{}) *Handler {
+	return &Handler{
+		HandlerFunc: f,
+		Format:      format,
+	}
+}
+
+type HandlerFunc func(event *ActionCableEvent)
 
 type Route struct {
 	Channel string
 	Handler HandlerFunc
 }
 
-func New(url string, adapter Adapter, header http.Header) (*Stream, error) {
+func New(url string, header http.Header) (*Stream, error) {
 	return &Stream{
-		Adapter: adapter,
-		Url:     url,
-		Header:  header,
+		Url:           url,
+		Header:        header,
+		subscriptions: []*Subscription{},
+		adapter:       ActionCableAdapter{},
 	}, nil
-}
-
-// Handler registers a handler function for a given channel
-func (s *Stream) Handler(channel string, handler HandlerFunc) {
-	if _, ok := s.subscriptions[channel]; !ok {
-		s.subscriptions[channel] = []HandlerFunc{}
-	}
-	s.subscriptions[channel] = append(s.subscriptions[channel], handler)
 }
 
 // Connect connects to the websocket stream, and
@@ -65,6 +77,8 @@ func (s *Stream) Connect(ctx context.Context) error {
 	done := make(chan struct{})
 
 	s.onConnect(c)
+	s.send = make(chan []byte, 10)
+
 	defer c.Close()
 
 	go func() {
@@ -72,12 +86,24 @@ func (s *Stream) Connect(ctx context.Context) error {
 		s.listen()
 	}()
 
+	for _, subscription := range s.subscriptions {
+		if err := subscription.Connect(); err != nil {
+			if s.ErrorHandler != nil {
+				s.ErrorHandler(err)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-done:
 			return nil
-		case <-s.send:
-
+		case msg := <-s.send:
+			if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+				if s.ErrorHandler != nil {
+					s.ErrorHandler(err)
+				}
+			}
 		case <-ctx.Done():
 			return s.close(done)
 		}
@@ -87,7 +113,6 @@ func (s *Stream) Connect(ctx context.Context) error {
 func (s *Stream) onConnect(connection *websocket.Conn) {
 	s.connection = connection
 	s.connected = true
-	s.send = make(chan []byte)
 
 	// Notify anyOnConnect handlers
 	if s.OnConnect != nil {
@@ -115,10 +140,13 @@ func (s *Stream) listen() {
 			s.ErrorHandler(err)
 			continue
 		}
-		if err = s.process(message); err != nil {
-			s.ErrorHandler(err)
-			continue
+		if s.OnMessage != nil {
+			s.OnMessage(message)
 		}
+		if err = s.process(message); err != nil && s.ErrorHandler != nil {
+			s.ErrorHandler(err)
+		}
+		continue
 	}
 }
 
@@ -126,7 +154,7 @@ func (s *Stream) listen() {
 // adapter, and then passes it along for dispatching
 func (s *Stream) process(message []byte) error {
 	// Parse the message using our adapter, t
-	event, err := s.Adapter.Unmarshal(message)
+	event, err := s.adapter.UnmarshalEvent(message)
 	if err != nil {
 		return err
 	}
@@ -136,26 +164,28 @@ func (s *Stream) process(message []byte) error {
 
 // dispatch takes a parsed event, and passes it off
 // to all of the registered handlers for its channel
-func (s *Stream) dispatch(message WebsocketMessage) error {
-	handlers, found := s.subscriptions[event.Channel]
-	if !found {
-		s.NotFoundHandler(event)
-		return errors.New(fmt.Sprintf("Channel %s not found for event", event.Channel))
-	} else {
-		for _, handler := range handlers {
-			// TODO: Support middleware
-			handler(event)
-		}
+func (s *Stream) dispatch(event *ActionCableEvent) error {
+	// TODO: Rather than route on event.Type, we should instead
+	// get the channel Identifier
+	// Ignore specified events to cut down chatter
+
+	if slices.Contains(ignoredEvents, event.Type) {
 		return nil
 	}
+	for _, subscription := range s.subscriptions {
+		if reflect.DeepEqual(subscription.Identifier, event.Identifier) {
+			subscription.Dispatch(event)
+		}
+	}
+	return nil
 }
 
 func (s *Stream) IsConnected() bool {
 	return s.connected
 }
 
-func (s *Stream) Send(event Event) error {
-	bytes, err := s.Adapter.Marshal(event)
+func (s *Stream) Send(event *ActionCableEvent) error {
+	bytes, err := s.adapter.MarshalEvent(event)
 	if err != nil {
 		s.ErrorHandler(err)
 		return err
@@ -163,4 +193,13 @@ func (s *Stream) Send(event Event) error {
 
 	s.send <- bytes
 	return nil
+}
+
+func (s *Stream) SendRaw(bytes []byte) {
+	s.send <- bytes
+}
+
+func (s *Stream) Subscribe(sub *Subscription) {
+	sub.Stream = s
+	s.subscriptions = append(s.subscriptions, sub)
 }

@@ -1,11 +1,18 @@
 package mux_socket
 
-// WebsocketMessage represents the parsed payload
-// returned from the stream
-type WebsocketMessage struct {
-	Channel string
-	Event   Event[any]
+import "encoding/json"
+
+type ActionCableEvent struct {
+	Identifier map[string]string
+	Data       *interface{}
+	Command    string
+	Type       string
+	Message    json.RawMessage
 }
 
-type Event[C any] struct {
+type RawMessage struct {
+	Type       string          `json:"type,omitempty"`
+	Message    json.RawMessage `json:"message,omitempty"`
+	Identifier string          `json:"identifier,omitempty"`
+	Command    string          `json:"command,omitempty"`
 }

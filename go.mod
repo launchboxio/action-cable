@@ -1,4 +1,4 @@
-module github.com/launchboxio/mux-socket
+module github.com/launchboxio/action-cable
 
 go 1.21
 
