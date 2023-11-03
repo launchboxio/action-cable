@@ -1,13 +1,13 @@
 package mux_socket
 
 import (
-  "context"
-  "github.com/gorilla/websocket"
-  "net/http"
-  "net/url"
-  "reflect"
-  "slices"
-  "time"
+	"context"
+	"github.com/gorilla/websocket"
+	"net/http"
+	"net/url"
+	"reflect"
+	"slices"
+	"time"
 )
 
 var ignoredEvents = []string{
